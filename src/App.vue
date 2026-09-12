@@ -1,0 +1,202 @@
+<script setup>
+import { ref, computed, watch, onMounted, nextTick } from 'vue';
+
+const STORAGE_KEY = 'todo-list-v1';
+
+function loadTodos() {
+  try {
+    const data = localStorage.getItem(STORAGE_KEY);
+    const parsed = data ? JSON.parse(data) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function pluralize(n) {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return 'задача';
+  if ([2, 3, 4].includes(mod10) && ![12, 13, 14].includes(mod100)) return 'задачи';
+  return 'задач';
+}
+
+// state
+const todos = ref(loadTodos());
+const filter = ref('all');
+const inputText = ref('');
+const inputEl = ref(null);
+
+// computed
+const activeCount = computed(() => todos.value.filter((t) => !t.done).length);
+const doneCount = computed(() => todos.value.length - activeCount.value);
+const canAdd = computed(() => inputText.value.trim().length > 0);
+const remainingText = computed(
+  () => `${activeCount.value} ${pluralize(activeCount.value)} осталось`
+);
+
+const filters = [
+  { value: 'all', label: 'Все' },
+  { value: 'active', label: 'Активные' },
+  { value: 'completed', label: 'Готовые' },
+];
+
+const filteredTodos = computed(() => {
+  if (filter.value === 'active') return todos.value.filter((t) => !t.done);
+  if (filter.value === 'completed') return todos.value.filter((t) => t.done);
+  return todos.value;
+});
+
+// methods
+function addTodo() {
+  const text = inputText.value.trim();
+  if (!text) return;
+  todos.value.push({
+    id: Date.now() + Math.random(),
+    text,
+    done: false,
+    createdAt: Date.now(),
+  });
+  inputText.value = '';
+  nextTick(() => inputEl.value?.focus());
+}
+
+function toggleTodo(id) {
+  const todo = todos.value.find((t) => t.id === id);
+  if (todo) todo.done = !todo.done;
+}
+
+function deleteTodo(id) {
+  todos.value = todos.value.filter((t) => t.id !== id);
+}
+
+function clearCompleted() {
+  todos.value = todos.value.filter((t) => !t.done);
+}
+
+function countFor(value) {
+  if (value === 'all') return todos.value.length;
+  if (value === 'active') return activeCount.value;
+  return doneCount.value;
+}
+
+// persistence
+watch(
+  todos,
+  () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(todos.value));
+  },
+  { deep: true }
+);
+
+// init
+onMounted(() => inputEl.value?.focus());
+</script>
+
+<template>
+  <div class="w-full max-w-md">
+    <!-- Header -->
+    <div class="text-center mb-8">
+      <h1 class="text-4xl font-bold text-white mb-2">📝 Todo List</h1>
+      <p class="text-slate-400 text-sm">
+        осталось <span class="text-purple-400 font-semibold">{{ activeCount }}</span> задач
+      </p>
+    </div>
+
+    <!-- Main Card -->
+    <div
+      class="bg-slate-800/50 backdrop-blur-sm rounded-2xl shadow-2xl border border-slate-700/50 overflow-hidden"
+    >
+      <!-- Input Form -->
+      <form @submit.prevent="addTodo" class="flex border-b border-slate-700/50">
+        <input
+          ref="inputEl"
+          v-model="inputText"
+          type="text"
+          placeholder="Что нужно сделать?"
+          class="flex-1 bg-transparent text-white placeholder-slate-500 px-6 py-4 focus:outline-none"
+          maxlength="200"
+          autocomplete="off"
+        />
+        <button
+          type="submit"
+          :disabled="!canAdd"
+          class="px-6 text-purple-400 hover:text-purple-300 font-semibold transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+        >
+          Добавить
+        </button>
+      </form>
+
+      <!-- Filters -->
+      <div class="flex border-b border-slate-700/50 text-sm">
+        <button
+          v-for="f in filters"
+          :key="f.value"
+          @click="filter = f.value"
+          :class="[
+            'flex-1 py-3 transition-colors border-b-2',
+            filter === f.value
+              ? 'text-white border-purple-400'
+              : 'text-slate-400 hover:text-white border-transparent',
+          ]"
+        >
+          {{ f.label }}
+          <span :class="['ml-1', filter === f.value ? 'text-slate-300' : 'text-slate-500']">
+            {{ countFor(f.value) }}
+          </span>
+        </button>
+      </div>
+
+      <!-- Todo List -->
+      <ul class="divide-y divide-slate-700/50 min-h-[100px]">
+        <li
+          v-if="filteredTodos.length === 0"
+          class="px-6 py-8 text-center text-slate-500 text-sm"
+        >
+          Пусто 🎉
+        </li>
+
+        <li
+          v-for="todo in filteredTodos"
+          :key="todo.id"
+          class="flex items-center gap-3 px-6 py-3 group hover:bg-slate-700/30 transition-colors"
+        >
+          <input
+            type="checkbox"
+            :checked="todo.done"
+            @change="toggleTodo(todo.id)"
+            class="w-5 h-5 rounded border-slate-600 bg-slate-700 text-purple-500 focus:ring-purple-500 focus:ring-offset-0 cursor-pointer"
+          />
+          <span
+            class="flex-1 text-slate-200 break-all"
+            :class="todo.done ? 'line-through text-slate-500' : ''"
+          >
+            {{ todo.text }}
+          </span>
+          <button
+            @click="deleteTodo(todo.id)"
+            class="text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all px-2"
+            aria-label="Удалить"
+          >
+            ✕
+          </button>
+        </li>
+      </ul>
+
+      <!-- Footer -->
+      <div
+        v-show="todos.length > 0"
+        class="flex items-center justify-between px-6 py-3 text-xs text-slate-500 border-t border-slate-700/50"
+      >
+        <span>{{ remainingText }}</span>
+        <button @click="clearCompleted" class="hover:text-red-400 transition-colors">
+          Очистить готовые
+        </button>
+      </div>
+    </div>
+
+    <p class="text-center text-slate-600 text-xs mt-6">
+      сохраняется автоматически в localStorage
+    </p>
+  </div>
+</template>
