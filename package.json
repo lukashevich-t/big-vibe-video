@@ -1,0 +1,22 @@
+{
+  "name": "big-vibe-video",
+  "version": "1.0.0",
+  "description": "Static HTTP server that serves index.html (Todo List on Vue 3 + Tailwind).",
+  "main": "server.js",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "http",
+    "static-server",
+    "vue",
+    "todo"
+  ],
+  "author": "",
+  "license": "MIT"
+}
