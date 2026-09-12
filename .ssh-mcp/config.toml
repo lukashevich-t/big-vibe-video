@@ -1,0 +1,9 @@
+[defaults]
+defaultProfile = "vps1"
+
+[[profiles]]
+name = "vps1"
+host = "vps1"
+user = "root"
+port = 22510
+auth = "agent"

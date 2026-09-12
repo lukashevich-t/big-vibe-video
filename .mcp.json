@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "ssh-vps1": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "ssh-mcp",
+        "--config=${PWD}/.ssh-mcp/config.toml"
+      ],
+      "env": {
+        "SSH_AUTH_SOCK": "${SSH_AUTH_SOCK}"
+      },
+      "directTools": true,
+      "lifecycle": "lazy",
+      "idleTimeout": 10
+    }
+  }
+}
