@@ -153,6 +153,24 @@ if ! remote "docker network inspect ${PROXY_NETWORK} >/dev/null 2>&1"; then
   exit 1
 fi
 
+# --- SYNC PROXY STACK FILES (на обычном деплое тоже) ---------------------------
+# Чтобы бампы версий proxy-стека подхватывались без --init-proxy,
+# зальём актуальные proxy/compose + .env.example и применим.
+if remote "[[ -d '${PROXY_REMOTE_DIR}' ]]"; then
+  log "Syncing proxy stack to ${PROXY_REMOTE_DIR}"
+  rsync -az \
+    -e "ssh -p $PORT" \
+    "$SCRIPT_DIR/proxy/docker-compose.yml" \
+    "$SCRIPT_DIR/proxy/.env.example" \
+    "${SSH_TARGET}:${PROXY_REMOTE_DIR}/"
+  remote "[[ -f '${PROXY_REMOTE_DIR}/.env' ]] || cp '${PROXY_REMOTE_DIR}/.env.example' '${PROXY_REMOTE_DIR}/.env'"
+  log "Applying proxy stack (pull + up -d)"
+  remote "cd '${PROXY_REMOTE_DIR}' && docker compose pull --quiet"
+  remote "cd '${PROXY_REMOTE_DIR}' && docker compose up -d --remove-orphans"
+else
+  log "Proxy stack not initialised on host — skipping (run --init-proxy to set up)"
+fi
+
 # --- SYNC SOURCES --------------------------------------------------------------
 log "Syncing sources to ${SSH_TARGET}:${APP_REMOTE_DIR}"
 rsync -az --delete \
