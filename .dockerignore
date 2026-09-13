@@ -1,0 +1,29 @@
+# Dependencies
+node_modules
+npm-debug.log*
+
+# Build output (built inside container)
+dist
+
+# Vite cache
+.vite
+
+# Editor / OS
+.DS_Store
+.idea
+.vscode
+
+# Logs
+*.log
+
+# Git
+.git
+.gitignore
+
+# Project meta (not needed in image)
+.mcp.json
+.ssh-mcp
+Readme.md
+
+# Deploy script itself (not needed in image)
+deploy.sh

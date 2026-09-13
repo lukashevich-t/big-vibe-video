@@ -166,3 +166,81 @@ ssh2 (gpg-agent-aware крипта). На холодном кэше — 2-3 ми
   активной pi-сессии держать SSH-соединение живым подольше.
 * Добавить второй профиль в `config.toml` (например, `vps2-staging`),
   чтобы можно было выбирать через `profile` параметр в вызове.
+
+---
+
+# Деплой
+
+## Архитектура
+
+* **Приложение:** Vue 3 SPA (`src/`, `index.html`, сборка через Vite).
+* **Dockerfile:** multi-stage — `node:20-alpine` (сборка) → `nginx:1.27-alpine` (раздача `dist/` на 3000).
+* **Systemd-юнит:** `systemd/big-vibe-video.service` — `Type=oneshot RemainAfterExit=yes`,
+  `ExecStart=docker run -d …`, автозапуск (`WantedBy=multi-user.target`).
+* **Хост:** `vps2:48390` (root, ключ `~/.ssh/id_ed25519_test`, уже в `~/.ssh/config`).
+* **Путь на сервере:** `/opt/big-vibe-video/`.
+
+## Скрипт деплоя — `deploy.sh`
+
+```bash
+./deploy.sh                # обычный деплой (rsync + build + restart)
+./deploy.sh --init         # первый запуск: установит Docker на сервере, если его нет
+./deploy.sh --rebuild      # форсировать docker build --no-cache
+./deploy.sh --no-service   # запустить контейнер вручную, не трогая systemd
+./deploy.sh --host HOST    # переопределить SSH-хост (по умолчанию vps2)
+```
+
+`deploy.sh` идемпотентен: каждый запуск заново синхронизирует исходники,
+пересобирает образ, переустанавливает systemd-юнит из `systemd/` и
+перезапускает контейнер.
+
+## Первый запуск
+
+```bash
+./deploy.sh --init         # установит Docker, скопирует systemd-юнит
+./deploy.sh                # зальёт исходники, соберёт образ, стартует сервис
+```
+
+После этого приложение слушает `http://vps2:3000/`.
+
+## Ежедневный деплой
+
+```bash
+# поправил код → коммитишь → пушишь (по желанию) →
+./deploy.sh
+```
+
+Скрипт сделает: rsync → `docker build` → `systemctl restart`.
+
+## Артефакты на сервере
+
+| Что | Где |
+|-----|-----|
+| Исходники | `/opt/big-vibe-video/` |
+| Docker-образ | `big-vibe-video:latest` |
+| Контейнер | `big-vibe-video` (порт 3000) |
+| systemd-юнит | `/etc/systemd/system/big-vibe-video.service` |
+| Логи контейнера | `docker logs big-vibe-video` |
+| Логи systemd | `journalctl -u big-vibe-video.service` |
+| Health | `http://127.0.0.1:3000/healthz` |
+
+## Диагностика
+
+```bash
+# статус
+ssh vps2 'systemctl status big-vibe-video.service'
+ssh vps2 'docker ps --filter name=big-vibe-video'
+
+# логи
+ssh vps2 'docker logs --tail=100 big-vibe-video'
+ssh vps2 'journalctl -u big-vibe-video.service -n 100 --no-pager'
+
+# ручной рестарт
+ssh vps2 'systemctl restart big-vibe-video.service'
+```
+
+## Что нужно для деплоя локально
+
+* `ssh` + `rsync` (в репо — `apt install rsync` / `brew install rsync`).
+* SSH-ключ `~/.ssh/id_ed25519_test` (либо правьте `deploy.sh` `--host` и `PORT`/`USER_REMOTE`).
+* Запись в `~/.ssh/config` (`Host vps2`, `Port 48390`, `User root`, `IdentityFile ~/.ssh/id_ed25519_test`) — уже есть.

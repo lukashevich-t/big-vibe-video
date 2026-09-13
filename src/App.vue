@@ -97,7 +97,7 @@ onMounted(() => inputEl.value?.focus());
   <div class="w-full max-w-md">
     <!-- Header -->
     <div class="text-center mb-8">
-      <h1 class="text-4xl font-bold text-white mb-2">📝 Todo List</h1>
+      <h1 class="text-4xl font-bold text-white mb-2">📝 ~Todo List~</h1>
       <p class="text-slate-400 text-sm">
         осталось <span class="text-purple-400 font-semibold">{{ activeCount }}</span> задач
       </p>
