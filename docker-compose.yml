@@ -1,0 +1,49 @@
+# Big Vibe Video — приложение.
+#
+# Контейнер не публикует порты на хост: его трафик идёт через общую
+# внешнюю сеть `nginx-proxy`, где работает jwilder/nginx-proxy + acme-companion
+# (стек поднимается отдельно в /opt/nginx-proxy/).
+#
+# `VIRTUAL_HOST`      — домен, на который отвечает nginx-proxy.
+# `LETSENCRYPT_HOST`  — домен для выпуска сертификата (можно список через запятую).
+# `LETSENCRYPT_EMAIL` — email для регистрации в Let's Encrypt.
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: big-vibe-video:latest
+    container_name: big-vibe-video
+    restart: unless-stopped
+
+    # Внутренний порт, на котором nginx в контейнере слушает (см. Dockerfile/nginx.conf).
+    # Публикации на хост нет — наружу смотрит только nginx-proxy.
+    expose:
+      - "3000"
+
+    environment:
+      VIRTUAL_HOST: ${VIRTUAL_HOST:?VIRTUAL_HOST is required}
+      LETSENCRYPT_HOST: ${LETSENCRYPT_HOST:?LETSENCRYPT_HOST is required}
+      LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL:?LETSENCRYPT_EMAIL is required}
+
+    networks:
+      - nginx-proxy
+
+    # Healthcheck совпадает с тем, что встроен в Dockerfile.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  nginx-proxy:
+    external: true
+    name: nginx-proxy

@@ -1,43 +1,51 @@
 #!/usr/bin/env bash
-# deploy.sh — sync sources to vps2, build image, (re)start container under systemd.
+# deploy.sh — sync sources to vps2, build image, (re)start via docker compose.
 #
 # Usage:
-#   ./deploy.sh                 # normal deploy (rsync + build + restart)
-#   ./deploy.sh --init          # first-time: install Docker + enable service
-#   ./deploy.sh --no-service    # run container but don't touch systemd
+#   ./deploy.sh                 # normal deploy (rsync + compose up -d --build)
+#   ./deploy.sh --init          # first-time: install Docker on the server
+#   ./deploy.sh --init-proxy    # first-time: bootstrap nginx-proxy + acme-companion
+#                               #             in /opt/nginx-proxy/ on the server
+#   ./deploy.sh --no-build      # pull existing image, don't rebuild
 #   ./deploy.sh --host HOST     # override SSH host alias
-#   ./deploy.sh --rebuild       # force --no-cache docker build
 #
 # Defaults: host=vps2 port=48390 user=root remote_dir=/opt/big-vibe-video
+#
+# Architecture:
+#   /opt/nginx-proxy/  — общий reverse-proxy (jwilder/nginx-proxy +
+#                         nginxproxy/acme-companion), docker compose.
+#   /opt/big-vibe-video/ — приложение, docker compose, отдельная сеть
+#                          `nginx-proxy` (external), переменные
+#                          VIRTUAL_HOST / LETSENCRYPT_* из .env.
 
 set -euo pipefail
 
 HOST="vps2"
 USER_REMOTE="root"
 PORT="48390"
-REMOTE_DIR="/opt/big-vibe-video"
-SERVICE_NAME="big-vibe-video"
+APP_REMOTE_DIR="/opt/big-vibe-video"
+PROXY_REMOTE_DIR="/opt/nginx-proxy"
+PROXY_NETWORK="nginx-proxy"
+SERVICE_NAME="app"               # имя сервиса внутри docker-compose.yml
 IMAGE_NAME="big-vibe-video"
 CONTAINER_NAME="big-vibe-video"
-HOST_PORT="3000"
-CONTAINER_PORT="3000"
 INIT_MODE=0
-TOUCH_SERVICE=1
-REBUILD=0
+INIT_PROXY=0
+DO_BUILD=1
 
 usage() {
-  sed -n '2,12p' "$0"
+  sed -n '2,17p' "$0"
   exit 0
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --init)        INIT_MODE=1; shift ;;
-    --no-service)  TOUCH_SERVICE=0; shift ;;
-    --rebuild)     REBUILD=1; shift ;;
-    --host)        HOST="${2:-}"; shift 2 ;;
-    -h|--help)     usage ;;
-    *)             echo "Unknown arg: $1"; usage ;;
+    --init)         INIT_MODE=1; shift ;;
+    --init-proxy)   INIT_PROXY=1; shift ;;
+    --no-build)     DO_BUILD=0; shift ;;
+    --host)         HOST="${2:-}"; shift 2 ;;
+    -h|--help)      usage ;;
+    *)              echo "Unknown arg: $1"; usage ;;
   esac
 done
 
@@ -50,19 +58,24 @@ err() { printf '\033[1;31m[deploy]\033[0m %s\n' "$*" >&2; }
 # Sanity checks
 command -v rsync >/dev/null || { err "rsync not installed locally"; exit 1; }
 command -v ssh   >/dev/null || { err "ssh not installed locally"; exit 1; }
-[[ -f "$SCRIPT_DIR/Dockerfile"                       ]] || { err "Dockerfile missing in $SCRIPT_DIR"; exit 1; }
-[[ -f "$SCRIPT_DIR/package.json"                     ]] || { err "package.json missing"; exit 1; }
-[[ -f "$SCRIPT_DIR/systemd/${SERVICE_NAME}.service"  ]] || { err "systemd/${SERVICE_NAME}.service missing"; exit 1; }
+[[ -f "$SCRIPT_DIR/Dockerfile"           ]] || { err "Dockerfile missing in $SCRIPT_DIR"; exit 1; }
+[[ -f "$SCRIPT_DIR/package.json"         ]] || { err "package.json missing"; exit 1; }
+[[ -f "$SCRIPT_DIR/docker-compose.yml"   ]] || { err "docker-compose.yml missing"; exit 1; }
+[[ -f "$SCRIPT_DIR/.env" || -f "$SCRIPT_DIR/.env.example" ]] \
+  || { err ".env (or .env.example) missing — copy from .env.example and edit"; exit 1; }
+
+# Prefer local .env; fall back to .env.example (значения всё равно перепишутся на сервере).
+ENV_FILE="$SCRIPT_DIR/.env"
+[[ -f "$ENV_FILE" ]] || ENV_FILE="$SCRIPT_DIR/.env.example"
 
 SSH_TARGET="${USER_REMOTE}@${HOST}"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -p "$PORT")
-
 remote() { ssh "${SSH_OPTS[@]}" "$SSH_TARGET" "$@"; }
 
-# --- INIT MODE: prepare server (Docker, dirs) -----------------------------------
+# --- INIT MODE: prepare server (Docker) ---------------------------------------
 if [[ $INIT_MODE -eq 1 ]]; then
   log "INIT: checking server prerequisites"
-  remote "mkdir -p '$REMOTE_DIR'"
+  remote "mkdir -p '$APP_REMOTE_DIR' '$PROXY_REMOTE_DIR'"
 
   if ! remote "command -v docker" >/dev/null 2>&1; then
     log "Docker not found on $HOST — installing"
@@ -84,11 +97,65 @@ INSTALL_DOCKER
   else
     log "Docker already present"
   fi
+
+  # Disable the legacy systemd unit (если он остался от предыдущей схемы).
+  if remote "systemctl list-unit-files | grep -q '^${IMAGE_NAME}\.service'"; then
+    log "Disabling legacy systemd unit ${IMAGE_NAME}.service"
+    remote "systemctl stop ${IMAGE_NAME}.service 2>/dev/null || true"
+    remote "systemctl disable ${IMAGE_NAME}.service 2>/dev/null || true"
+    remote "rm -f /etc/systemd/system/${IMAGE_NAME}.service"
+    remote "systemctl daemon-reload"
+  fi
+
+  # Stop legacy bare container, если остался.
+  remote "docker rm -f ${CONTAINER_NAME} 2>/dev/null || true"
+
   log "INIT: done"
 fi
 
-# --- SYNC SOURCES ----------------------------------------------------------------
-log "Syncing sources to ${SSH_TARGET}:${REMOTE_DIR}"
+# --- INIT PROXY MODE: поднять nginx-proxy в /opt/nginx-proxy -------------------
+if [[ $INIT_PROXY -eq 1 ]]; then
+  log "INIT-PROXY: bootstrapping nginx-proxy in ${PROXY_REMOTE_DIR}"
+  remote "mkdir -p '$PROXY_REMOTE_DIR'"
+
+  # Upload proxy stack files (они лежат рядом с deploy.sh).
+  rsync -az \
+    -e "ssh -p $PORT" \
+    "$SCRIPT_DIR/proxy/docker-compose.yml" \
+    "$SCRIPT_DIR/proxy/.env.example" \
+    "${SSH_TARGET}:${PROXY_REMOTE_DIR}/"
+
+  # .env — копия .env.example, если на сервере ещё нет своего.
+  remote "[[ -f '${PROXY_REMOTE_DIR}/.env' ]] || cp '${PROXY_REMOTE_DIR}/.env.example' '${PROXY_REMOTE_DIR}/.env'"
+
+  # Сеть создаётся самим proxy-compose, но на случай повторного запуска убедимся.
+  remote "docker network inspect ${PROXY_NETWORK} >/dev/null 2>&1 || docker network create ${PROXY_NETWORK}"
+
+  log "Bringing up nginx-proxy stack"
+  remote "cd '${PROXY_REMOTE_DIR}' && docker compose pull --quiet"
+  remote "cd '${PROXY_REMOTE_DIR}' && docker compose up -d --remove-orphans"
+
+  # Ждём, пока nginx-proxy поднимется и начнёт слушать 80/443.
+  for i in $(seq 1 20); do
+    if remote "curl -fsS -o /dev/null -m 2 http://127.0.0.1:80/ 2>/dev/null || curl -sS -o /dev/null -m 2 -w '%{http_code}' http://127.0.0.1:80/ | grep -qE '^(200|301|302|307|308|404|421|503)$'"; then
+      log "nginx-proxy is listening on :80"
+      break
+    fi
+    sleep 1
+  done
+
+  log "INIT-PROXY: done"
+fi
+
+# --- Убедиться, что external network существует ------------------------------
+# На случай если --init-proxy не запускали в этой сессии.
+if ! remote "docker network inspect ${PROXY_NETWORK} >/dev/null 2>&1"; then
+  log "Creating external network ${PROXY_NETWORK}"
+  remote "docker network create ${PROXY_NETWORK}"
+fi
+
+# --- SYNC SOURCES --------------------------------------------------------------
+log "Syncing sources to ${SSH_TARGET}:${APP_REMOTE_DIR}"
 rsync -az --delete \
   --exclude '.git' \
   --exclude 'node_modules' \
@@ -101,60 +168,58 @@ rsync -az --delete \
   --exclude '.idea' \
   --exclude '.vscode' \
   --exclude 'deploy.sh' \
+  --exclude 'proxy/' \
   -e "ssh -p $PORT" \
-  ./ "${SSH_TARGET}:${REMOTE_DIR}/"
+  ./ "${SSH_TARGET}:${APP_REMOTE_DIR}/"
 
-# --- (RE)INSTALL SYSTEMD UNIT ---------------------------------------------------
-# Always refresh the unit file from the synced copy so changes to the unit
-# (e.g. port, image name) get applied on every deploy.
-if [[ $TOUCH_SERVICE -eq 1 ]]; then
-  log "Installing systemd unit /etc/systemd/system/${SERVICE_NAME}.service"
-  remote "install -m 0644 '${REMOTE_DIR}/systemd/${SERVICE_NAME}.service' /etc/systemd/system/${SERVICE_NAME}.service"
-  remote "systemctl daemon-reload"
+# --- BUILD + RESTART через docker compose -------------------------------------
+BUILD_ARGS=()
+COMPOSE_ARGS=(up -d --remove-orphans)
+if [[ $DO_BUILD -eq 1 ]]; then
+  BUILD_ARGS+=(--build)
 fi
 
-# --- BUILD IMAGE ON SERVER -------------------------------------------------------
-BUILD_FLAGS=()
-[[ $REBUILD -eq 1 ]] && BUILD_FLAGS+=(--no-cache)
+log "(Re)starting app via docker compose on ${HOST}"
+remote "cd '${APP_REMOTE_DIR}' && docker compose ${COMPOSE_ARGS[*]} ${BUILD_ARGS[*]} ${SERVICE_NAME}"
 
-log "Building image ${IMAGE_NAME}:latest on ${HOST}"
-remote "cd '${REMOTE_DIR}' && docker build ${BUILD_FLAGS[*]} -t ${IMAGE_NAME}:latest ."
+# --- HEALTH CHECK --------------------------------------------------------------
+# Внешний домен может ещё не отвечать (Let's Encrypt в процессе выпуска),
+# поэтому проверяем и внутренний healthcheck, и доступность через прокси.
+sleep 2
 
-# --- RESTART CONTAINER -----------------------------------------------------------
-log "Stopping previous container (if any)"
-remote "docker rm -f ${CONTAINER_NAME} 2>/dev/null || true"
-
-if [[ $TOUCH_SERVICE -eq 1 ]]; then
-  log "Starting via systemd: ${SERVICE_NAME}.service"
-  remote "systemctl reset-failed ${SERVICE_NAME}.service 2>/dev/null || true"
-  remote "systemctl enable ${SERVICE_NAME}.service" 2>/dev/null || true
-  remote "systemctl restart --no-block ${SERVICE_NAME}.service"
-  # Wait for the service to reach 'active' (Type=oneshot+RemainAfterExit marks active
-  # once ExecStart exits 0). Cap the wait so we never hang forever.
-  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-    state=$(remote "systemctl is-active ${SERVICE_NAME}.service 2>/dev/null" || true)
-    if [[ "$state" == "active" ]]; then
-      break
-    fi
-    sleep 1
-  done
-  remote "systemctl is-active ${SERVICE_NAME}.service" || true
-  remote "docker ps --filter name=${CONTAINER_NAME} --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'" || true
+log "Health check (internal): http://127.0.0.1:3000/healthz"
+if remote "docker inspect --format='{{.State.Health.Status}}' ${CONTAINER_NAME}" 2>/dev/null \
+     | grep -q '^healthy$'; then
+  log "OK — container is healthy"
 else
-  log "Starting container directly (no systemd touch)"
-  remote "docker run -d --name ${CONTAINER_NAME} --restart unless-stopped -p ${HOST_PORT}:${CONTAINER_PORT} ${IMAGE_NAME}:latest"
-fi
-
-# --- HEALTH CHECK ----------------------------------------------------------------
-log "Health check: http://${HOST}:${HOST_PORT}/"
-sleep 1
-if remote "curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:${HOST_PORT}/" | grep -q '^200$'; then
-  log "OK — service is responding on port ${HOST_PORT}"
-else
-  err "Service is NOT responding on port ${HOST_PORT}"
+  err "Container is NOT healthy yet"
   err "--- container logs ---"
   remote "docker logs --tail=50 ${CONTAINER_NAME} 2>&1 || true"
   exit 1
 fi
 
-log "Deployed → http://${HOST}:${HOST_PORT}/"
+VHOST=$(grep -E '^VIRTUAL_HOST=' "$ENV_FILE" | head -1 | cut -d= -f2-)
+log "Waiting for https://${VHOST}/ to respond"
+ok=0
+for i in $(seq 1 30); do
+  code=$(remote "curl -ksS -o /dev/null -m 5 -w '%{http_code}' https://${VHOST}/" 2>/dev/null || true)
+  if [[ "$code" =~ ^2 ]]; then
+    log "OK — https://${VHOST}/ → ${code}"
+    ok=1
+    break
+  fi
+  sleep 2
+done
+
+if [[ $ok -ne 1 ]]; then
+  err "https://${VHOST}/ is not responding with 2xx yet"
+  err "--- nginx-proxy logs (last 40 lines) ---"
+  remote "docker logs --tail=40 nginx-proxy 2>&1 || true"
+  err "--- acme-companion logs (last 40 lines) ---"
+  remote "docker logs --tail=40 nginx-proxy-acme 2>&1 || true"
+  err "--- app logs (last 40 lines) ---"
+  remote "docker logs --tail=40 ${CONTAINER_NAME} 2>&1 || true"
+  exit 1
+fi
+
+log "Deployed → https://${VHOST}/"

@@ -25,5 +25,6 @@ dist
 .ssh-mcp
 Readme.md
 
-# Deploy script itself (not needed in image)
+# Deploy script and proxy stack (not needed in image)
 deploy.sh
+proxy/

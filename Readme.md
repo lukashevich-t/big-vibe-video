@@ -173,74 +173,133 @@ ssh2 (gpg-agent-aware крипта). На холодном кэше — 2-3 ми
 
 ## Архитектура
 
-* **Приложение:** Vue 3 SPA (`src/`, `index.html`, сборка через Vite).
-* **Dockerfile:** multi-stage — `node:20-alpine` (сборка) → `nginx:1.27-alpine` (раздача `dist/` на 3000).
-* **Systemd-юнит:** `systemd/big-vibe-video.service` — `Type=oneshot RemainAfterExit=yes`,
-  `ExecStart=docker run -d …`, автозапуск (`WantedBy=multi-user.target`).
-* **Хост:** `vps2:48390` (root, ключ `~/.ssh/id_ed25519_test`, уже в `~/.ssh/config`).
-* **Путь на сервере:** `/opt/big-vibe-video/`.
+На сервере работают **два независимых docker compose-стека**, объединённых
+общей внешней сетью `nginx-proxy`:
+
+```
+Интернет ──► nginx-proxy (80/443, сертификат Let's Encrypt)
+                  │  docker network: nginx-proxy
+                  ▼
+            big-vibe-video  ────► nginx внутри контейнера :3000
+```
+
+* **Приложение:** Vue 3 SPA (`src/`, `index.html`, сборка через Vite),
+  multi-stage Dockerfile (node:20-alpine → nginx:1.27-alpine на 3000).
+* **docker-compose.yml** — описывает только приложение. Порт на хост **не
+  публикуется**, наружу смотрит исключительно nginx-proxy. Конфиг
+  читает переменные из локального `.env` (`VIRTUAL_HOST`,
+  `LETSENCRYPT_HOST`, `LETSENCRYPT_EMAIL`).
+* **proxy/docker-compose.yml** — описывает `nginxproxy/nginx-proxy:1.1.0`
+  и `nginxproxy/acme-companion:2.4.0`. Поднимается отдельно в
+  `/opt/nginx-proxy/`.
+* **Хост:** `vps2:48390` (root, ключ `~/.ssh/id_ed25519_test`, есть в
+  `~/.ssh/config`).
+* **Домен:** `bigvibecourse.freedynamicdns.net` → `132.243.214.223` (A-запись
+  уже настроена).
 
 ## Скрипт деплоя — `deploy.sh`
 
 ```bash
-./deploy.sh                # обычный деплой (rsync + build + restart)
-./deploy.sh --init         # первый запуск: установит Docker на сервере, если его нет
-./deploy.sh --rebuild      # форсировать docker build --no-cache
-./deploy.sh --no-service   # запустить контейнер вручную, не трогая systemd
-./deploy.sh --host HOST    # переопределить SSH-хост (по умолчанию vps2)
+./deploy.sh                 # обычный деплой (rsync + compose up -d --build)
+./deploy.sh --init          # первый запуск: установит Docker на сервере
+./deploy.sh --init-proxy    # поднять nginx-proxy + acme-companion в /opt/nginx-proxy/
+./deploy.sh --no-build      # поднять без пересборки образа
+./deploy.sh --host HOST     # переопределить SSH-хост (по умолчанию vps2)
 ```
 
 `deploy.sh` идемпотентен: каждый запуск заново синхронизирует исходники,
-пересобирает образ, переустанавливает systemd-юнит из `systemd/` и
-перезапускает контейнер.
+пересобирает образ, и перезапускает стек через `docker compose up -d`.
 
-## Первый запуск
+## Первый запуск (полная последовательность)
 
 ```bash
-./deploy.sh --init         # установит Docker, скопирует systemd-юнит
-./deploy.sh                # зальёт исходники, соберёт образ, стартует сервис
+cp .env.example .env       # отредактируйте под свой домен/email
+./deploy.sh --init         # установит Docker, отключит старый systemd-юнит
+./deploy.sh --init-proxy   # поднимет nginx-proxy + acme-companion
+./deploy.sh                # соберёт образ и задеплоит приложение
 ```
 
-После этого приложение слушает `http://vps2:3000/`.
+После этого:
+
+* `https://bigvibecourse.freedynamicdns.net/` отвечает валидным
+  сертификатом Let's Encrypt.
+* Сертификат обновляется автоматически (acme-companion следит за
+  истечением).
 
 ## Ежедневный деплой
 
 ```bash
-# поправил код → коммитишь → пушишь (по желанию) →
+# поправил код → коммитишь →
 ./deploy.sh
 ```
 
-Скрипт сделает: rsync → `docker build` → `systemctl restart`.
+Скрипт сделает: rsync → `docker compose build` → `docker compose up -d`.
 
 ## Артефакты на сервере
 
 | Что | Где |
 |-----|-----|
-| Исходники | `/opt/big-vibe-video/` |
-| Docker-образ | `big-vibe-video:latest` |
-| Контейнер | `big-vibe-video` (порт 3000) |
-| systemd-юнит | `/etc/systemd/system/big-vibe-video.service` |
-| Логи контейнера | `docker logs big-vibe-video` |
-| Логи systemd | `journalctl -u big-vibe-video.service` |
-| Health | `http://127.0.0.1:3000/healthz` |
+| Исходники приложения | `/opt/big-vibe-video/` |
+| Стек приложения (compose) | `/opt/big-vibe-video/docker-compose.yml` |
+| `.env` приложения | `/opt/big-vibe-video/.env` |
+| Стек прокси (compose) | `/opt/nginx-proxy/docker-compose.yml` |
+| `.env` прокси | `/opt/nginx-proxy/.env` |
+| Сертификаты | volume `nginx-proxy_certs` (named) |
+| Кэш acme.sh | volume `nginx-proxy_acme` (named) |
+| Внешняя сеть | `nginx-proxy` (bridge) |
+| Логи прокси | `docker logs nginx-proxy` |
+| Логи acme-companion | `docker logs nginx-proxy-acme` |
+| Логи приложения | `docker logs big-vibe-video` |
+| Health приложения | `http://127.0.0.1:3000/healthz` (внутри контейнера) |
 
 ## Диагностика
 
 ```bash
-# статус
-ssh vps2 'systemctl status big-vibe-video.service'
-ssh vps2 'docker ps --filter name=big-vibe-video'
+# стеки и сеть
+ssh vps2 'docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"'
+ssh vps2 'docker network inspect nginx-proxy --format "{{range .Containers}}{{.Name}} {{end}}"'
 
-# логи
+# логи прокси / acme / приложения
+ssh vps2 'docker logs --tail=100 nginx-proxy'
+ssh vps2 'docker logs --tail=100 nginx-proxy-acme'
 ssh vps2 'docker logs --tail=100 big-vibe-video'
-ssh vps2 'journalctl -u big-vibe-video.service -n 100 --no-pager'
+
+# проверка сертификата
+ssh vps2 'docker exec nginx-proxy ls /etc/nginx/certs'
+curl -vI https://bigvibecourse.freedynamicdns.net/
 
 # ручной рестарт
-ssh vps2 'systemctl restart big-vibe-video.service'
+ssh vps2 'cd /opt/big-vibe-video && docker compose restart'
+ssh vps2 'cd /opt/nginx-proxy   && docker compose restart'
 ```
+
+## Как работает `VIRTUAL_HOST`
+
+`nginx-proxy` слушает docker socket, видит контейнеры с переменной
+окружения `VIRTUAL_HOST=<домен>` и автоматически проксирует запросы на
+порт этого контейнера. `acme-companion` отдельно видит
+`LETSENCRYPT_HOST` / `LETSENCRYPT_EMAIL` и запрашивает/обновляет
+сертификат через ACME http-01 challenge (порт 80). Дополнительная
+настройка nginx не нужна — конфиг генерируется при старте контейнеров.
+
+## Миграция со старой схемы (systemd + bare docker run)
+
+Старая версия использовала `systemd/big-vibe-video.service` и запускала
+контейнер через `docker run -d ... -p 3000:3000`. Эта схема:
+
+* конфликтовала с любым другим сервисом на 80/443;
+* не умела выпускать сертификаты;
+* не позволяла добавить второй сайт без правки systemd-юнита.
+
+`deploy.sh --init` теперь отключает старый systemd-юнит и удаляет
+голый контейнер, поэтому миграция прозрачна.
 
 ## Что нужно для деплоя локально
 
 * `ssh` + `rsync` (в репо — `apt install rsync` / `brew install rsync`).
-* SSH-ключ `~/.ssh/id_ed25519_test` (либо правьте `deploy.sh` `--host` и `PORT`/`USER_REMOTE`).
-* Запись в `~/.ssh/config` (`Host vps2`, `Port 48390`, `User root`, `IdentityFile ~/.ssh/id_ed25519_test`) — уже есть.
+* SSH-ключ `~/.ssh/id_ed25519_test` (либо правьте `deploy.sh` `--host` и
+  `PORT`/`USER_REMOTE`).
+* Запись в `~/.ssh/config` (`Host vps2`, `Port 48390`, `User root`,
+  `IdentityFile ~/.ssh/id_ed25519_test`).
+* Локально должен существовать `.env` со значениями `VIRTUAL_HOST`,
+  `LETSENCRYPT_HOST`, `LETSENCRYPT_EMAIL` (рядом с `docker-compose.yml`).

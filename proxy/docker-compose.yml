@@ -1,0 +1,64 @@
+# nginx-proxy + acme-companion.
+#
+# Этот стек поднимается ОТДЕЛЬНО от приложения, в /opt/nginx-proxy/
+# на сервере. Приложения (например, big-vibe-video) подключаются к
+# общей внешней сети `nginx-proxy` и передают VIRTUAL_HOST /
+# LETSENCRYPT_HOST / LETSENCRYPT_EMAIL через переменные окружения —
+# nginx-proxy и acme-companion автоматически их подхватывают.
+#
+# Версии образов зафиксированы, чтобы поведение было стабильным.
+
+services:
+  nginx-proxy:
+    image: nginxproxy/nginx-proxy:1.1.0
+    container_name: nginx-proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/tmp/docker.sock:ro
+      - certs:/etc/nginx/certs
+      - html:/usr/share/nginx/html
+      - dhparam:/etc/nginx/dhparam
+    networks:
+      - nginx-proxy
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  acme-companion:
+    image: nginxproxy/acme-companion:2.4.0
+    container_name: nginx-proxy-acme
+    restart: unless-stopped
+    depends_on:
+      - nginx-proxy
+    # nginx-proxy-acme наследует тома от nginx-proxy (как требует upstream).
+    volumes_from:
+      - nginx-proxy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - acme:/etc/acme.sh
+    environment:
+      NGINX_PROXY_CONTAINER: nginx-proxy
+      # Email по умолчанию для всех сертификатов (если у контейнера
+      # не задан LETSENCRYPT_EMAIL — берётся этот).
+      DEFAULT_EMAIL: ${DEFAULT_EMAIL:?DEFAULT_EMAIL is required}
+    networks:
+      - nginx-proxy
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  certs:
+  html:
+  dhparam:
+  acme:
+
+networks:
+  nginx-proxy:
+    name: nginx-proxy
+    driver: bridge

@@ -15,3 +15,6 @@ dist/
 # Logs
 *.log
 npm-debug.log*
+
+# Local overrides for docker compose (секреты/email/домен не коммитим)
+.env
