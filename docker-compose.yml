@@ -24,6 +24,9 @@ services:
 
     environment:
       VIRTUAL_HOST: ${VIRTUAL_HOST:?VIRTUAL_HOST is required}
+      # Явно указываем порт — у базового образа nginx:alpine уже есть EXPOSE 80,
+      # и без VIRTUAL_PORT nginx-proxy подключался бы к 80 вместо 3000.
+      VIRTUAL_PORT: "3000"
       LETSENCRYPT_HOST: ${LETSENCRYPT_HOST:?LETSENCRYPT_HOST is required}
       LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL:?LETSENCRYPT_EMAIL is required}
 
