@@ -168,8 +168,19 @@ rsync -az --delete \
   --exclude '.vscode' \
   --exclude 'deploy.sh' \
   --exclude 'proxy/' \
+  --exclude '.env.example' \
   -e "ssh -p $PORT" \
   ./ "${SSH_TARGET}:${APP_REMOTE_DIR}/"
+
+# .env не в гите, поэтому rsync его не зальёт — копируем отдельно
+# (на сервере появится файл /opt/big-vibe-video/.env).
+if [[ -f "$SCRIPT_DIR/.env" ]]; then
+  log "Uploading .env to ${APP_REMOTE_DIR}/.env"
+  rsync -az -e "ssh -p $PORT" "$SCRIPT_DIR/.env" "${SSH_TARGET}:${APP_REMOTE_DIR}/.env"
+else
+  err ".env not found locally — copy from .env.example and edit before deploying"
+  exit 1
+fi
 
 # --- BUILD + RESTART через docker compose -------------------------------------
 BUILD_ARGS=()
