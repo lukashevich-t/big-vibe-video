@@ -128,17 +128,15 @@ if [[ $INIT_PROXY -eq 1 ]]; then
   # .env — копия .env.example, если на сервере ещё нет своего.
   remote "[[ -f '${PROXY_REMOTE_DIR}/.env' ]] || cp '${PROXY_REMOTE_DIR}/.env.example' '${PROXY_REMOTE_DIR}/.env'"
 
-  # Сеть создаётся самим proxy-compose, но на случай повторного запуска убедимся.
-  remote "docker network inspect ${PROXY_NETWORK} >/dev/null 2>&1 || docker network create ${PROXY_NETWORK}"
-
   log "Bringing up nginx-proxy stack"
   remote "cd '${PROXY_REMOTE_DIR}' && docker compose pull --quiet"
   remote "cd '${PROXY_REMOTE_DIR}' && docker compose up -d --remove-orphans"
 
   # Ждём, пока nginx-proxy поднимется и начнёт слушать 80/443.
-  for i in $(seq 1 20); do
-    if remote "curl -fsS -o /dev/null -m 2 http://127.0.0.1:80/ 2>/dev/null || curl -sS -o /dev/null -m 2 -w '%{http_code}' http://127.0.0.1:80/ | grep -qE '^(200|301|302|307|308|404|421|503)$'"; then
-      log "nginx-proxy is listening on :80"
+  for i in $(seq 1 30); do
+    code=$(remote "curl -sS -o /dev/null -m 2 -w '%{http_code}' http://127.0.0.1:80/ 2>/dev/null || true")
+    if [[ "$code" =~ ^[0-9]{3}$ ]]; then
+      log "nginx-proxy is listening on :80 (got ${code})"
       break
     fi
     sleep 1
@@ -150,8 +148,9 @@ fi
 # --- Убедиться, что external network существует ------------------------------
 # На случай если --init-proxy не запускали в этой сессии.
 if ! remote "docker network inspect ${PROXY_NETWORK} >/dev/null 2>&1"; then
-  log "Creating external network ${PROXY_NETWORK}"
-  remote "docker network create ${PROXY_NETWORK}"
+  err "External network '${PROXY_NETWORK}' does not exist"
+  err "Run: ./deploy.sh --init-proxy"
+  exit 1
 fi
 
 # --- SYNC SOURCES --------------------------------------------------------------
