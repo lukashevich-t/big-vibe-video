@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "ssh-vps1": {
+    "ssh-vps2": {
       "command": "npx",
       "args": [
         "-y",

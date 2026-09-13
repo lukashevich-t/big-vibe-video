@@ -1,9 +1,10 @@
 [defaults]
-defaultProfile = "vps1"
+defaultProfile = "vps2"
 
 [[profiles]]
-name = "vps1"
-host = "vps1"
+name = "vps2"
+host = "vps2"
 user = "root"
-port = 22510
-auth = "agent"
+port = 48390
+auth = "key"
+keyRef = "~/.ssh/id_ed25519_test"
